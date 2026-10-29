@@ -1,0 +1,16 @@
+[Desktop Entry]
+# Szablon. install_fedora_gui.sh kopiuje go do ~/.local/share/applications/
+# i podmienia @GUI_DIR@ na pełną ścieżkę folderu pdfmaker_gui.
+# Ręcznie: sed "s|@GUI_DIR@|$PWD|g" pdfmaker.desktop > ~/.local/share/applications/pdfmaker.desktop
+Type=Application
+Name=pdfmaker
+GenericName=Skan PDF → LaTeX/PDF
+Comment=OCR zeskanowanych książek do PDF z tekstem i wzorami (LaTeX)
+Exec=@GUI_DIR@/gui.sh %f
+Path=@GUI_DIR@
+Icon=x-office-document
+Terminal=false
+Categories=Office;Utility;
+MimeType=application/pdf;
+StartupNotify=true
+StartupWMClass=Tk
