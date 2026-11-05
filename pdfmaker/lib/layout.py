@@ -86,6 +86,19 @@ def render_gray(pdf, dpi, page=1):
 def fmt(v):
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
+def fmt_size(v):
+    """Quantize font size to 0.25pt so XeTeX font slots stay bounded across long books."""
+    return fmt(round(float(v) * 4) / 4)
+
+def fmt_fakebold(v):
+    """Snap FakeBold to {0, 0.25, 0.5} to match the 3 predeclared roman / 2 math families."""
+    x = float(v)
+    if x < 0.125:
+        return "0"
+    if x < 0.375:
+        return "0.25"
+    return "0.5"
+
 
 # ------------------------------------------------------------------ scan analysis
 IMAGE_PAGE_DARK = 0.30   # pages with more dark pixels are treated as pictures (covers, photos)
@@ -482,14 +495,22 @@ def preamble(page_w, page_h, engine="xelatex"):
 \usepackage{amsmath,amssymb,mathtools}\usepackage[polish]{babel}
 \newcommand{\pmsf}{\fontfamily{lmss}\fontseries{sbc}\selectfont}"""
     else:
+        # XeTeX has a hard ~9000 font-slot limit. Per-page \addfontfeatures / \setmathfont FakeBold
+        # and continuous \fontsize values (OCR sizes + shrink loops) each allocate a slot. Fix:
+        # declare a fixed set of FakeBold families once, switch with \mathversion, and snap \pmS
+        # to a 0.25bp grid so long faithful books stay under the limit.
+        _rm_opts = ("BoldFont=lmroman10-bold.otf,ItalicFont=lmroman10-italic.otf,"
+                    "BoldItalicFont=lmroman10-bolditalic.otf,SlantedFont=lmromanslant10-regular.otf")
         fonts = r"""\usepackage{amsmath,mathtools}
 \usepackage{fontspec}
 \usepackage{unicode-math}
-\setmainfont{lmroman10-regular.otf}[BoldFont=lmroman10-bold.otf,ItalicFont=lmroman10-italic.otf,
-  BoldItalicFont=lmroman10-bolditalic.otf,SlantedFont=lmromanslant10-regular.otf]
+\setmainfont{lmroman10-regular.otf}[""" + _rm_opts + r"""]
 \setsansfont{Latin Modern Sans}
 \setmonofont{DejaVu Sans Mono}[Scale=0.85]
 \setmathfont{Latin Modern Math}
+\newfontfamily\pmrmz{lmroman10-regular.otf}[""" + _rm_opts + r"""]
+\newfontfamily\pmrma{lmroman10-regular.otf}[""" + _rm_opts + r""",FakeBold=0.25]
+\newfontfamily\pmrmb{lmroman10-regular.otf}[""" + _rm_opts + r""",FakeBold=0.5]
 """ + "\n".join(rf"\newfontfamily\pmsf{k}{{{f}}}" for k, f in SF_FONTS.items()) + r"""
 \newcommand{\pmsf}{\pmsflmsansbold}
 \usepackage{newunicodechar}
@@ -513,8 +534,12 @@ def preamble(page_w, page_h, engine="xelatex"):
 \allowdisplaybreaks
 % ---- pdfmaker faithful layout macros
 \newsavebox\pmbox \newdimen\pmS \newdimen\pmB \newdimen\pmT \newdimen\pmW \newdimen\pmL \newif\ifpmagain
+% Snap \pmS to a 0.25bp grid so XeTeX does not allocate a new font slot for every OCR/shrink size.
+% Snap \pmS to a 0.25bp grid (XeTeX font-slot hygiene). Grow/shrink steps are also 0.25bp so the
+% loop cannot round back to the same size and hang.
+\newcommand\pmsnaps{{\pmT=\pmS\advance\pmT by 8192sp\divide\pmT by 16384\multiply\pmT by 16384\pmS=\pmT}}
 % \pmpar{{x}}{{y}}{{w}}{{h}}{{size}}{{baselineskip factor}}{{font/style}}{{indent}}{{content}}: paragraph box, (x,y)=first baseline,
-% width w; font shrinks (1.5% steps, down to 80% -- never unreadable) until the box height fits h (+10%); a rest
+% width w; font shrinks (0.25bp steps, down to 80% -- never unreadable) until the box height fits h (+10%); a rest
 % of more than +25% is squeezed in height (moderately), so blocks do not run into the next one
 \newsavebox\pmcb
 % \pmcell{{w}}{{content}}: a cell of a row ('a) ..  b) ..'): starts at the scanned x offset, never overprints the next one
@@ -525,31 +550,31 @@ def preamble(page_w, page_h, engine="xelatex"):
     \sbox\pmbox{{\begin{{minipage}}[t]{{#3bp}}\fontsize{{\pmS}}{{\pmB}}\selectfont#7%
       \lineskiplimit=0pt\lineskip=0.15\pmS\relax\hspace*{{#8bp}}#9\par\xdef\pmgot{{\the\prevgraf}}\end{{minipage}}}}%
     \pmT=\ht\pmbox \advance\pmT by \dp\pmbox}}%
-  \pmS=#5bp\relax \pmL=#4bp\relax \pmL=1.1\pmL \advance\pmL by 1.5bp
+  \pmS=#5bp\relax\pmsnaps \pmL=#4bp\relax \pmL=1.1\pmL \advance\pmL by 1.5bp
   \pmbuild
-  % grow (max +7%) while the paragraph has fewer lines than on the scan
+  % grow (max +7%) while the paragraph has fewer lines than on the scan; step = one grid cell
   \loop \pmagainfalse
     \ifnum\pmgot<\pmlines\relax \ifdim\pmS<1.07\dimexpr#5bp\relax \ifdim\pmT<\pmL \pmagaintrue\fi\fi\fi
-  \ifpmagain \pmS=1.01\pmS \pmbuild \repeat
-  \ifdim\pmT>\pmL \ifdim\pmS>#5bp \pmS=0.99\pmS \pmbuild\fi\fi
-  % shrink while too tall (down to 55%) or more lines than on the scan (down to 93%)
+  \ifpmagain \advance\pmS by 0.25bp \pmbuild \repeat
+  \ifdim\pmT>\pmL \ifdim\pmS>#5bp \advance\pmS by -0.25bp \pmbuild\fi\fi
+  % shrink while too tall (down to 80%) or more lines than on the scan (down to 93%)
   \loop \pmagainfalse
     \ifdim\pmT>\pmL \ifdim\pmS>0.8\dimexpr#5bp\relax \pmagaintrue\fi\fi
     \ifnum\pmlines>0 \ifnum\pmgot>\pmlines\relax \ifdim\pmS>0.93\dimexpr#5bp\relax \pmagaintrue\fi\fi\fi
-  \ifpmagain \pmS=0.985\pmS \pmbuild \repeat
+  \ifpmagain \advance\pmS by -0.25bp \pmbuild \repeat
   \pmL=1.25\pmL
   \ifdim\pmT>\pmL \sbox\pmbox{{\resizebox*{{!}}{{\pmL}}{{\usebox\pmbox}}}}\fi
   \pmvscale\put(#1,-#2){{\usebox\pmbox}}\gdef\pmlines{{0}}}}
 % \pmline{{x}}{{baseline}}{{w}}{{size}}{{style}}{{content}}: single line, scaled to the scanned width w (-inf..+12%)
 \newcommand\pmline[6]{{%
-  \pmS=#4bp\relax
+  \pmS=#4bp\relax\pmsnaps
   \sbox\pmbox{{\fontsize{{\pmS}}{{1.2\pmS}}\selectfont#5#6}}%
   \pmW=#3bp\relax \pmT=1.12\wd\pmbox
   \ifdim\pmT>\pmW \sbox\pmbox{{\resizebox{{\pmW}}{{!}}{{\usebox\pmbox}}}}\fi
   \pmvscale\put(#1,-#2){{\usebox\pmbox}}}}
 % \pmspread: like \pmline, but inter-word spaces stretch so the line spans the full width w (as in the scan)
 \newcommand\pmspread[6]{{%
-  \pmS=#4bp\relax
+  \pmS=#4bp\relax\pmsnaps
   \sbox\pmbox{{\fontsize{{\pmS}}{{1.2\pmS}}\selectfont#5#6}}%
   \pmW=#3bp\relax
   \ifdim\wd\pmbox>\pmW \sbox\pmbox{{\resizebox{{\pmW}}{{!}}{{\usebox\pmbox}}}}%
@@ -559,7 +584,7 @@ def preamble(page_w, page_h, engine="xelatex"):
 % \pmeq{{cx}}{{cy}}{{w}}{{h}}{{size}}{{rows}}{{mode 0|1 jot|2 arraystretch}}{{math}}: display formula centred at
 % (cx,cy): scaled to the scanned width w (max 130%), row spacing opened up to reach the scanned height h, never taller
 \newcommand\pmeq[8]{{\begingroup
-  \pmS=#5bp\relax
+  \pmS=#5bp\relax\pmsnaps
   \sbox\pmbox{{\fontsize{{\pmS}}{{1.2\pmS}}\selectfont$\displaystyle #8$}}%
   \pmW=#3bp\relax \pmL=#4bp\relax
   \pmT=1.3\wd\pmbox \ifdim\pmT<\pmW \pmW=\pmT\fi
@@ -587,10 +612,23 @@ def preamble(page_w, page_h, engine="xelatex"):
 \newcommand\pmfb{{0}}
 \newcommand\pmst{{1}}
 \newcommand\pmsy{{1}}
-\newcommand\pmweight[3]{{\def\pmfbnew{{#1}}\ifx\pmfbnew\pmfb\else\setmathfont{{Latin Modern Math}}[FakeBold=#1]\fi
-  \def\pmfb{{#1}}\def\pmst{{#2}}\def\pmsy{{#3}}}}
+% Pick among 3 predeclared roman FakeBold families; math FakeBold only toggles between 2 \setmathfont setups
+% (never per-fragment \addfontfeatures). Size snapping (\pmsnaps) keeps XeTeX slots bounded.
+\newcommand\pmweight[3]{{\edef\pmfbnew{{#1}}%
+  \dimen0=#1pt\relax
+  \ifdim\dimen0<0.375pt\relax\def\pmmathfb{{0}}\else\def\pmmathfb{{1}}\fi
+  \ifx\pmmathfb\pmmathfbcur\else
+    \ifdim\dimen0<0.375pt\relax\setmathfont{{Latin Modern Math}}%
+    \else\setmathfont{{Latin Modern Math}}[FakeBold=0.5]\fi
+    \let\pmmathfbcur\pmmathfb
+  \fi
+  \def\pmfb{{#1}}\def\pmst{{#2}}\def\pmsy{{#3}}%
+  \ifdim\dimen0<0.125pt\relax\def\pmrm{{\pmrmz}}%
+  \else\ifdim\dimen0<0.375pt\relax\def\pmrm{{\pmrma}}%
+  \else\def\pmrm{{\pmrmb}}\fi\fi}}
+\newcommand\pmmathfbcur{{-1}}
 \newcommand\pmvscale{{\ifdim\pmsy pt=1pt\else\sbox\pmbox{{\scalebox{{1}}[\pmsy]{{\usebox\pmbox}}}}\fi}}
-\newcommand\pmrm{{\normalfont\addfontfeatures{{FakeBold=\pmfb,FakeStretch=\pmst}}}}
+\newcommand\pmrm{{\pmrmz}}
 \newenvironment{{pmpage}}{{\clearpage\noindent\begin{{picture}}(0,0)}}{{\end{{picture}}\par\null\clearpage}}
 \newcommand{{\pdfmakerwarn}}[1]{{{{\color{{red}}\footnotesize\textsf{{[pdfmaker: #1]}}}}}}
 """
@@ -1095,7 +1133,7 @@ def build_page(n, layout, src_pdf, img_dir, clean_md=lambda s: s, engine="xelate
             em = eq_math(md)
             rows, mode = eq_rows(em)
             add(rf"\pmeq{{{fmt((x0 + x1) / 2)}}}{{{fmt((y0 + y1) / 2)}}}{{{fmt(w)}}}{{{fmt(h)}}}"
-                rf"{{{fmt(size_body)}}}{{{rows}}}{{{mode}}}{{{em}}}", i)
+                rf"{{{fmt_size(size_body)}}}{{{rows}}}{{{mode}}}{{{em}}}", i)
         else:
             tex = tex_of.get(i, esc(md))
             style = rf"\pmsf{sf_key}" if b["fam"] == "sf" else r"\pmrm"
@@ -1111,18 +1149,18 @@ def build_page(n, layout, src_pdf, img_dir, clean_md=lambda s: s, engine="xelate
                 target = (y0 + y1) / 2 + xh_b / 2
                 base = b["base"] if b.get("base") else (min(bls, key=lambda v: abs(v - target)) if bls else target)
                 macro = "pmspread" if b.get("spread") else "pmline"
-                add(rf"\{macro}{{{fmt(x0)}}}{{{fmt(base)}}}{{{fmt(w + 0.5)}}}{{{fmt(b['size'])}}}{{{style}}}"
+                add(rf"\{macro}{{{fmt(x0)}}}{{{fmt(base)}}}{{{fmt(w + 0.5)}}}{{{fmt_size(b['size'])}}}{{{style}}}"
                     rf"{{{tex}}}", i)
             else:
                 base = bls[0] if bls else y0 + 0.75 * b["size"]
                 nl = len(bls) if len(bls) >= 2 else 0
-                add(rf"\def\pmlines{{{nl}}}\pmpar{{{fmt(x0)}}}{{{fmt(base)}}}{{{fmt(w + 0.5)}}}{{{fmt(h / sy)}}}{{{fmt(b["size"])}}}"
+                add(rf"\def\pmlines{{{nl}}}\pmpar{{{fmt(x0)}}}{{{fmt(base)}}}{{{fmt(w + 0.5)}}}{{{fmt(h / sy)}}}{{{fmt_size(b["size"])}}}"
                     rf"{{{fmt(bskip)}}}{{{style}}}{{{fmt(b['indent'])}}}{{{tex}}}", i)
     info["images"] = nimg
 
     def assemble(ls):
         body = "\n".join(c for c, _ in ls)
-        return (f"% page {n} (pdfmaker --layout faithful)\n\\pmweight{{{fmt(fb)}}}{{{fmt(stretch)}}}{{{fmt(sy)}}}\n"
+        return (f"% page {n} (pdfmaker --layout faithful)\n\\pmweight{{{fmt_fakebold(fb)}}}{{{fmt(stretch)}}}{{{fmt(sy)}}}\n"
                 f"\\begin{{pmpage}}\n{body}\n\\end{{pmpage}}\n")
 
     # ------------- compile check with per-block fallback
@@ -1160,7 +1198,7 @@ def _fallback(item, cmd, repair_math, first=True):
         return m.group(1) + "{" + eq_math(repair_math(md)) + "}"
     plain = esc(re.sub(r"\s+", " ", md))
     x0, y0, x1, y1 = b["ink"]
-    return (rf"\pmpar{{{fmt(x0)}}}{{{fmt(y0 + 0.75 * b.get('size', 9))}}}{{{fmt(x1 - x0)}}}{{{fmt(y1 - y0)}}}{{{fmt(b.get('size', 9))}}}{{1.2}}"
+    return (rf"\pmpar{{{fmt(x0)}}}{{{fmt(y0 + 0.75 * b.get('size', 9))}}}{{{fmt(x1 - x0)}}}{{{fmt(y1 - y0)}}}{{{fmt_size(b.get('size', 9))}}}{{1.2}}"
             rf"{{\normalfont\color{{red!70!black}}}}{{0}}{{{plain}}}")
 
 

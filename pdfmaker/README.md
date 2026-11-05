@@ -110,6 +110,7 @@ i `~/.cache/datalab`; potem można pracować offline (`export HF_HUB_OFFLINE=1`)
   Strony zdjęciowe (np. okładka, >30% ciemnych pikseli) są wstawiane w całości jako obraz skanu (tekst z OCR jest
   wtedy tylko w `book.md`). Na bardzo gęstych stronach z odpowiedziami (same wzory, np. str. 100) OCR łączy bloki
   i zgodność jest wyraźnie niższa (ssim ≈ 0,85, ink_f1 ≈ 0,52) – wzory mogą na siebie nachodzić.
+- Long faithful books: XeTeX's ~9000 font-slot limit used to abort around ~200 pages (continuous OCR sizes + per-page FakeBold via `\addfontfeatures`/`\setmathfont`). Fixed by predeclaring a small set of FakeBold families, quantizing sizes to 0.25 pt, and compiling the book in ~120-page chunks merged with `qpdf`. `--skip-ocr` reuses existing `pages/page_NNNN.tex` and only rebuilds `book.tex`/`book.pdf`.
   Program kończy tylko własny `llama-server` (uruchomiony przez swój proces OCR); inne zadania na komputerze nie są ruszane.
 
 ## Zmiany (v2, tryb `--layout faithful`)

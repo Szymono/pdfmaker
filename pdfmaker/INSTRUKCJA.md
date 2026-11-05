@@ -103,6 +103,7 @@ przykładach i zadaniach, ramki, pogrubione „Rozwiązanie”, „a)”, „b)�
   nohup ./convert.sh /workspace/ksiazki/skoczylas.pdf --out /workspace/ksiazki/uklad --layout faithful > uklad.log 2>&1 &
   ```
   Każda strona źródła to dokładnie jedna strona wyniku (`--newpage` nie jest potrzebne). Czas: ~1 min OCR + ~5 s na stronę.
+- Długie książki (`--layout faithful`): składanie idzie w porcjach ~120 stron (limit slotów czcionek XeLaTeX ~9000) i jest scalane przez `qpdf`. Po poprawkach w `pages/page_NNNN.tex` wystarczy `./convert.sh … --skip-ocr --layout faithful` (bez ponownego OCR).
 - Po ręcznej poprawce tekstu w `pages/page_NNNN.json` (pole `"md"` bloku) przebuduj przez `--skip-ocr --layout faithful`.
 - Jeśli czcionki wydają się za grube/za cienkie: `--fakebold 0` (cienkie, „czyste” Latin Modern) albo np. `--fakebold 1`.
 - Okładka i inne strony zdjęciowe są wstawiane jako obraz całej strony. Strony złożone prawie wyłącznie ze wzorów

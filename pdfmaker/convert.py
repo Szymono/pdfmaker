@@ -9,7 +9,7 @@ Usage:
   --mode math  (default) Marker + Surya OCR (Polish text + LaTeX formulas), CPU ok
   --mode text  Tesseract 'pol' plain text (fast fallback, no formulas) + searchable PDF
 Re-running with the same --out resumes: pages whose .md already exists are not OCR'd again
-(use --force to redo).  --skip-ocr only rebuilds .tex/.pdf from existing .md (after manual edits).
+(use --force to redo).  --skip-ocr only rebuilds .tex/.pdf from existing .md/.json (after manual edits); in --layout faithful it also reuses existing pages/page_NNNN.tex when present.
 Figures (math mode) are cropped from the scan by Marker and saved as pages/img/pNNNN_<Figure|Picture>_<k>.png|jpg,
 referenced from pages/page_NNNN.md as img/<file>; --no-images disables this (figures are then dropped).
 References to images that do not exist are replaced by a visible placeholder (never break the build).
@@ -514,7 +514,12 @@ def main():
 def write_report(out, stats, old_report, t0, pdf, pages):
     stats["_total_sec"] = round(time.time() - t0, 1)
     merged = {k: v for k, v in old_report.items() if isinstance(v, dict) and k.isdigit()}
-    merged.update({str(k): v for k, v in stats.items() if isinstance(k, int)})
+    for k, v in stats.items():
+        if not isinstance(k, int):
+            continue
+        prev = merged.get(str(k), {})
+        # keep prior images/layout/similarity when a reuse pass only refreshes tex status
+        merged[str(k)] = {**prev, **v}
     merged = {k: merged[k] for k in sorted(merged, key=int)}
     st_all = [v.get("tex") for v in merged.values()]
     merged["_summary"] = {"pages": len(merged), "tex_ok": sum(1 for x in st_all if str(x).startswith("ok")),
@@ -535,6 +540,46 @@ def write_report(out, stats, old_report, t0, pdf, pages):
         log(f"  p.{n}: ocr={s.get('ocr','cached')} {s.get('ocr_sec','')}s  tex={s.get('tex')}{sim}")
 
 # ---------------------------------------------------------------- faithful layout
+def _compile_faithful_chunks(out, pre, pages, engine, chunk_size=120):
+    """Compile faithful book in chunks so XeTeX stays under its ~9000 font-slot limit, then merge with qpdf."""
+    book = out / "book.tex"
+    bodies = [f"\\input{{pages/page_{n:04d}.tex}}\n" for n in pages]
+    book.write_text(pre + "\\begin{document}\n" + "".join(bodies) + "\\end{document}\n", encoding="utf-8")
+    pdf = out / "book.pdf"
+    if len(pages) <= chunk_size:
+        log(f"Compiling {book.name} with {engine} (faithful layout, {len(pages)} pages)")
+        run([engine, "-interaction=nonstopmode", "-no-shell-escape", book.name], cwd=out, timeout=3600)
+        return pdf
+    chunk_pdfs = []
+    nchunks = (len(pages) + chunk_size - 1) // chunk_size
+    log(f"Compiling faithful book in {nchunks} chunks of <={chunk_size} pages ({engine}), then merging with qpdf")
+    for ci, i in enumerate(range(0, len(pages), chunk_size)):
+        chunk = pages[i:i + chunk_size]
+        name = f"book_chunk_{ci:03d}"
+        ctex = out / f"{name}.tex"
+        body = "".join(f"\\input{{pages/page_{n:04d}.tex}}\n" for n in chunk)
+        ctex.write_text(pre + "\\begin{document}\n" + body + "\\end{document}\n", encoding="utf-8")
+        log(f"  chunk {ci + 1}/{nchunks}: pages {chunk[0]}-{chunk[-1]} -> {name}.pdf")
+        run([engine, "-interaction=nonstopmode", "-no-shell-escape", f"{name}.tex"], cwd=out, timeout=3600)
+        cpdf = out / f"{name}.pdf"
+        if not cpdf.exists():
+            log(f"ERROR: chunk compile failed, see {name}.log")
+            return pdf
+        chunk_pdfs.append(cpdf)
+        for ext in (".aux", ".out"):
+            (out / f"{name}{ext}").unlink(missing_ok=True)
+    args = ["qpdf", "--warning-exit-0", "--empty", "--pages", *[str(p) for p in chunk_pdfs], "--", str(pdf)]
+    r = run(args)
+    if r.returncode != 0 or not pdf.exists():
+        log(f"ERROR: qpdf merge failed: {r.stderr or r.stdout}")
+    else:
+        log(f"Merged {len(chunk_pdfs)} chunks -> {pdf.name}")
+        for p in chunk_pdfs:
+            p.unlink(missing_ok=True)
+            (out / (p.stem + ".tex")).unlink(missing_ok=True)
+    return pdf
+
+
 def faithful_build(a, src, out, pdir, wdir, pages, stats, old_report, md_path, t0):
     sys.path.insert(0, str(HERE / "lib"))
     import layout as L
@@ -543,7 +588,21 @@ def faithful_build(a, src, out, pdir, wdir, pages, stats, old_report, md_path, t
     bodies = []
     for n in pages:
         tt = time.time()
+        texp = pdir / f"page_{n:04d}.tex"
         jp = md_path(n).with_suffix(".json")
+        # --skip-ocr: reuse existing page tex (book preamble/macros refreshed below); skip slow per-page checks
+        if a.skip_ocr and texp.exists() and not a.force:
+            if jp.exists() and size is None:
+                try:
+                    lay = json.loads(jp.read_text(encoding="utf-8"))
+                    size = (lay["page_bbox"][2], lay["page_bbox"][3])
+                except Exception:
+                    pass
+            st = stats[n].get("tex") or old_report.get(str(n), {}).get("tex") or "ok"
+            stats[n].update(tex=st, tex_sec=round(time.time() - tt, 1))
+            bodies.append(f"\\input{{pages/page_{n:04d}.tex}}\n")
+            log(f"  page {n}: reusing existing page tex ({stats[n]['tex_sec']} s)")
+            continue
         if jp.exists():
             lay = json.loads(jp.read_text(encoding="utf-8"))
             size = size or (lay["page_bbox"][2], lay["page_bbox"][3])
@@ -561,7 +620,7 @@ def faithful_build(a, src, out, pdir, wdir, pages, stats, old_report, md_path, t
         else:
             frag, st = ("\\begin{pmpage}\\put(40,-60){\\pdfmakerwarn{no layout json for page %d -- rerun OCR}}"
                         "\\end{pmpage}\n" % n, "missing")
-        (pdir / f"page_{n:04d}.tex").write_text(frag, encoding="utf-8")
+        texp.write_text(frag, encoding="utf-8")
         stats[n].update(tex=st, tex_sec=round(time.time() - tt, 1))
         bodies.append(f"\\input{{pages/page_{n:04d}.tex}}\n")
         log(f"  page {n}: faithful layout {st} ({stats[n]['tex_sec']} s)")
@@ -570,16 +629,12 @@ def faithful_build(a, src, out, pdir, wdir, pages, stats, old_report, md_path, t
         m = re.search(r"Page size:\s+([\d.]+) x ([\d.]+)", r)
         size = (float(m.group(1)), float(m.group(2))) if m else (595.28, 841.89)
     pre = L.preamble(size[0], size[1], a.engine)
-    book = out / "book.tex"
-    book.write_text(pre + "\\begin{document}\n" + "".join(bodies) + "\\end{document}\n", encoding="utf-8")
     md_all = "\n\n".join(f"<!-- strona {n} -->\n" + (md_path(n).read_text(encoding='utf-8') if md_path(n).exists() else '')
                          for n in pages).replace("](img/", "](pages/img/")
     (out / "book.md").write_text(md_all, encoding="utf-8")
-    log(f"Compiling {book.name} with {a.engine} (faithful layout)")
-    run([a.engine, "-interaction=nonstopmode", "-no-shell-escape", book.name], cwd=out, timeout=3600)
-    pdf = out / "book.pdf"
+    pdf = _compile_faithful_chunks(out, pre, pages, a.engine)
     if not pdf.exists():
-        log("ERROR: combined compile failed, see book.log")
+        log("ERROR: combined compile failed, see book.log / book_chunk_*.log")
     elif a.compare:
         import compare as C
         cdir = out / "compare"
