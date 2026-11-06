@@ -3,7 +3,7 @@
 Lokalna konwersja skanów PDF do LaTeX/PDF (OCR bez zewnętrznego AI) + okienkowe GUI.
 
 - `pdfmaker/` – skrypt (instrukcja: `pdfmaker/INSTRUKCJA.md`, `pdfmaker/README.md`)
-- `pdfmaker_gui/` – GUI uruchamiające skrypt (`pdfmaker_gui/GUI.md`)
+- `pdfmaker_gui/` – GUI (Tk/ttk, opcjonalnie ttkbootstrap: motyw jasny/ciemny) uruchamiające skrypt (`pdfmaker_gui/GUI.md`)
 
 ## Instalacja (Fedora)
 ```bash
@@ -16,4 +16,5 @@ cd ../pdfmaker_gui && ./install_fedora_gui.sh
 ## Aktualizacja
 ```bash
 cd pdfmaker && git pull
+cd pdfmaker_gui && ./install_fedora_gui.sh   # po aktualizacji GUI: doinstaluje ttkbootstrap (opcjonalny)
 ```
